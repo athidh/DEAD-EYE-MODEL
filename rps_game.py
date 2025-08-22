@@ -2,13 +2,14 @@ import cv2
 import mediapipe as mp
 import time
 import numpy as np
+import requests # <--- NEW: Import requests library
 
 # --- Constants ---
 WINNING_SCORE = 5
 FONT = cv2.FONT_HERSHEY_DUPLEX
-# --- NEW: Wager Constants ---
-STARTING_BALANCE = 100
-WAGER_AMOUNT = 10
+# --- OLD: Wager Constants (Balances are now managed by backend) ---
+# STARTING_BALANCE = 100
+# WAGER_AMOUNT = 10 
 # Colors
 C_BLUE = (255, 0, 0)
 C_RED = (0, 0, 255)
@@ -16,16 +17,22 @@ C_GREEN = (0, 255, 0)
 C_WHITE = (255, 255, 255)
 C_BLACK = (0, 0, 0)
 
+# --- NEW: Backend Integration Constants ---
+BACKEND_URL = "http://localhost:3000" # <--- Your Node.js backend URL
+# This DUEL_ID needs to be dynamically fetched from your backend when a duel starts
+# For a quick test, you can get an existing Duel ID from your MongoDB Atlas.
+ACTIVE_DUEL_ID = "YOUR_CURRENT_DUEL_ID_FROM_BACKEND" # <--- REPLACE THIS with an actual Duel ID
+
 ## --- UI Drawing Function ---
 def draw_ui(canvas, game_state, scores, winner, countdown, gestures, balances):
-    """Handles all drawing operations, now including player balances."""
+    """Handles all drawing operations, now with balances (received from backend or kept for display logic)."""
     p1_score, p2_score = scores
-    p1_bal, p2_bal = balances # Unpack balances
+    p1_bal, p2_bal = balances # Unpack balances (these would ideally come from backend)
     ui_h, ui_w, _ = canvas.shape
     
     # --- Header ---
     cv2.putText(canvas, "PLAYER 1", (50, 90), FONT, 1.5, C_BLUE, 3)
-    # --- NEW: Display Player 1 Balance ---
+    # --- NEW: Display Player 1 Balance (Still displayed, but updated by backend) ---
     cv2.putText(canvas, f"Balance: {p1_bal}", (50, 600), FONT, 1, C_WHITE, 2)
 
     score_text = f"{p1_score} - {p2_score}"
@@ -33,9 +40,8 @@ def draw_ui(canvas, game_state, scores, winner, countdown, gestures, balances):
     cv2.putText(canvas, score_text, ((ui_w - text_size[0]) // 2, 100), FONT, 2.5, C_WHITE, 4)
     
     cv2.putText(canvas, "PLAYER 2", (ui_w - 350, 90), FONT, 1.5, C_RED, 3)
-    # --- NEW: Display Player 2 Balance ---
+    # --- NEW: Display Player 2 Balance (Still displayed, but updated by backend) ---
     cv2.putText(canvas, f"Balance: {p2_bal}", (ui_w - 350, 600), FONT, 1, C_WHITE, 2)
-
 
     # --- Player View Borders ---
     cv2.rectangle(canvas, (50, 120), (610, 540), C_BLUE, 3)
@@ -64,7 +70,7 @@ def draw_ui(canvas, game_state, scores, winner, countdown, gestures, balances):
         text_size, _ = cv2.getTextSize(result_text, FONT, 2, 3)
         cv2.putText(canvas, result_text, ((ui_w - text_size[0]) // 2, ui_h // 2 + 15), FONT, 2, C_GREEN, 3)
     elif game_state == "GAME_OVER":
-        final_winner = "Player 1" if p1_score >= WINNING_SCORE else "Player 2"
+        final_winner = "Player 1" if p1_score >= WINNING_SCORE else "Player 2" # Still uses local WINNING_SCORE
         overlay = canvas.copy()
         cv2.rectangle(overlay, (0, ui_h // 2 - 100), (ui_w, ui_h // 2 + 100), C_BLACK, -1)
         alpha = 0.8
@@ -72,7 +78,7 @@ def draw_ui(canvas, game_state, scores, winner, countdown, gestures, balances):
         cv2.putText(canvas, "GAME OVER", ((ui_w - 450) // 2, ui_h // 2 - 20), FONT, 3, C_RED, 7)
         cv2.putText(canvas, f"{final_winner} WINS!", ((ui_w - 480) // 2, ui_h // 2 + 60), FONT, 2.5, C_GREEN, 5)
 
-# --- Gesture Classification (no changes needed) ---
+# --- Gesture Classification ---
 def classify_gesture(hand_landmarks):
     landmarks = hand_landmarks.landmark; mp_hands = mp.solutions.hands
     fingertip_y = [landmarks[mp_hands.HandLandmark.THUMB_TIP].y, landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP].y, landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_TIP].y, landmarks[mp_hands.HandLandmark.RING_FINGER_TIP].y, landmarks[mp_hands.HandLandmark.PINKY_TIP].y]
@@ -83,7 +89,7 @@ def classify_gesture(hand_landmarks):
     elif not any(fingers_extended[1:]): return "Rock"
     return "Unknown"
 
-# --- Function to determine the round winner (no changes needed) ---
+# --- Function to determine the round winner ---
 def get_round_winner(g1, g2):
     if g1 == "Unknown" or g2 == "Unknown": return None
     if g1 == g2: return "Tie"
@@ -91,12 +97,16 @@ def get_round_winner(g1, g2):
     else: return "Player 2"
 
 # --- Game State and Setup ---
-gameState = "COUNTDOWN"; player1_score, player2_score = 0, 0; last_round_winner = None
-# --- NEW: Wager Management Variables ---
-player1_balance, player2_balance = STARTING_BALANCE, STARTING_BALANCE
+gameState = "COUNTDOWN"
+player1_score, player2_score = 0, 0
+last_round_winner = None
+# --- OLD: Wager Management Variables (commented out, as backend will manage) ---
+player1_balance, player2_balance = 0, 0 # Initialize to 0, backend will send true values
 
-countdown_start_time = time.time(); result_display_start_time = 0
-mp_drawing = mp.solutions.drawing_utils; mp_hands = mp.solutions.hands
+countdown_start_time = time.time()
+result_display_start_time = 0
+mp_drawing = mp.solutions.drawing_utils
+mp_hands = mp.solutions.hands
 
 # --- Webcam setup ---
 cap = cv2.VideoCapture(0)
@@ -105,6 +115,34 @@ ret, frame = cap.read()
 if not ret: raise IOError("Could not read frame from webcam")
 cam_h, cam_w, _ = frame.shape
 ui_h, ui_w = 720, 1280
+
+# --- NEW: Function to get current duel details from backend ---
+def fetch_current_duel():
+    try:
+        response = requests.get(f"{BACKEND_URL}/duel/current")
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"Error fetching current duel: {response.status_code} - {response.text}")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Failed to connect to backend to fetch duel: {e}")
+        return None
+
+# --- NEW: Fetch duel on startup ---
+current_duel_data = fetch_current_duel()
+if current_duel_data:
+    ACTIVE_DUEL_ID = current_duel_data['_id']
+    player1_score = current_duel_data['scores']['player1']
+    player2_score = current_duel_data['scores']['player2']
+    # You would also fetch player balances here from the User model if available
+    # For now, let's keep them as 0, or fetch them dynamically
+    print(f"Active Duel ID: {ACTIVE_DUEL_ID}. Initial Scores: P1({player1_score}) - P2({player2_score})")
+else:
+    print("No active duel found or failed to connect to backend. Please start a duel from the backend or frontend first.")
+    # For hackathon, you might want to exit or run in a demo mode if no duel is active
+    # exit() 
+
 
 with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7, max_num_hands=2) as hands:
     while True:
@@ -144,21 +182,54 @@ with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7, m
                         mp_drawing.draw_landmarks(p2_view, hand_landmarks, mp_hands.HAND_CONNECTIONS)
             
             round_winner = get_round_winner(player1_gesture, player2_gesture)
-            if round_winner:
-                # --- NEW: Update Scores and Balances ---
-                if round_winner == "Player 1":
-                    player1_score += 1
-                    player1_balance += WAGER_AMOUNT
-                    player2_balance -= WAGER_AMOUNT
-                elif round_winner == "Player 2":
-                    player2_score += 1
-                    player2_balance += WAGER_AMOUNT
-                    player1_balance -= WAGER_AMOUNT
+            if round_winner and round_winner != "Tie":
+                # --- OLD: Local score and balance updates (REMOVED/COMMENTED OUT) ---
+                # These updates will now be managed by the Node.js backend
+                # if round_winner == "Player 1":
+                #     player1_score += 1
+                #     player1_balance += WAGER_AMOUNT
+                #     player2_balance -= WAGER_AMOUNT
+                # elif round_winner == "Player 2":
+                #     player2_score += 1
+                #     player2_balance += WAGER_AMOUNT
+                #     player1_balance -= WAGER_AMOUNT
                 
+                # --- NEW: Send game data to the backend ---
+                if ACTIVE_DUEL_ID != "YOUR_CURRENT_DUEL_ID_FROM_BACKEND": # Only send if a valid duel ID exists
+                    try:
+                        payload = {
+                            "winner": round_winner,
+                            # We send the local scores, but the backend is the source of truth
+                            # The backend will update its scores and send back the authoritative ones.
+                            "scores": { 
+                                "player1": player1_score + (1 if round_winner == "Player 1" else 0),
+                                "player2": player2_score + (1 if round_winner == "Player 2" else 0)
+                            },
+                            "duelId": ACTIVE_DUEL_ID
+                        }
+                        response = requests.post(f"{BACKEND_URL}/duel/game-result", json=payload)
+                        if response.status_code == 200:
+                            print("Round result sent to backend.")
+                            # OPTIONAL: Update local scores/balances immediately from backend response
+                            # response_data = response.json()
+                            # player1_score = response_data['scores']['player1']
+                            # player2_score = response_data['scores']['player2']
+                            # player1_balance = response_data['balances']['player1']
+                            # player2_balance = response_data['balances']['player2']
+                        else:
+                            print(f"Error: Backend returned status code {response.status_code} - {response.text}")
+                    except requests.exceptions.RequestException as e:
+                        print(f"Failed to connect to backend: {e}")
+                else:
+                    print("No active duel ID set. Cannot send game results to backend.")
+
+
                 last_round_winner, result_display_start_time = round_winner, time.time()
                 gameState = "RESULT"
 
         elif gameState == "RESULT":
+            # The GAME_OVER condition should ideally also be determined by the backend
+            # based on scores/balances, but keeping local check for immediate feedback
             if player1_score >= WINNING_SCORE or player2_score >= WINNING_SCORE or player1_balance <= 0 or player2_balance <= 0:
                 gameState = "GAME_OVER"
             elif time.time() - result_display_start_time > 2.5:
@@ -172,7 +243,7 @@ with mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7, m
         
         # --- Call the centralized drawing function ---
         draw_ui(ui_canvas, gameState, (player1_score, player2_score), last_round_winner, countdown_value, 
-                (player1_gesture, player2_gesture), (player1_balance, player2_balance)) # Pass balances to UI
+                (player1_gesture, player2_gesture), (player1_balance, player2_balance))
 
         cv2.imshow('Rock Paper Scissor UI', ui_canvas)
 
